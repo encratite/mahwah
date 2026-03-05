@@ -43,6 +43,7 @@ type Configuration struct {
 	ExecutionCost float64 `yaml:"executionCost"`
 	BorrowCost float64 `yaml:"borrowCost"`
 	RiskFreeRate float64 `yaml:"riskFreeRate"`
+	Tax float64 `yaml:"tax"`
 	RebalanceMode string `yaml:"rebalanceMode"`
 	RebalanceDay commons.SerializableWeekday `yaml:"rebalanceDay"`
 	VolatilityDays int `yaml:"volatilityDays"`
@@ -191,6 +192,7 @@ func performBacktest() {
 		commons.Fatalf("Unable to determine latest index components")
 	}
 	cash := configuration.InitialCash
+	capitalGains := 0.0
 	returns := []float64{}
 	plotData := PlotData{
 		Dates: []string{},
@@ -219,6 +221,7 @@ func performBacktest() {
 				commons.Fatalf("Invalid returns: %f", pnl)
 			}
 			cash += pnl
+			capitalGains += pnl
 		}
 		r := getRateOfChange(cash, previousCash)
 		dateString := commons.GetDateString(date)
@@ -227,6 +230,12 @@ func performBacktest() {
 		plotData.Returns = append(plotData.Returns, totalReturn)
 		returns = append(returns, r)
 		positions = []stockPosition{}
+		if date.Month() == time.January {
+			if capitalGains > 0 {
+				cash -= configuration.Tax * capitalGains
+				capitalGains = 0.0
+			}
+		}
 	}
 	rebalanceMode := getRebalanceMode(configuration.RebalanceMode)
 	previousRebalance := false
