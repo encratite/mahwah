@@ -46,7 +46,11 @@ type Configuration struct {
 	Tax float64 `yaml:"tax"`
 	RebalanceMode string `yaml:"rebalanceMode"`
 	RebalanceDay commons.SerializableWeekday `yaml:"rebalanceDay"`
-	LookbackPeriod int `yaml:"lookbackPeriod"`
+	VolatilityDays int `yaml:"volatilityDays"`
+	MomentumDays int `yaml:"momentumDays"`
+	MomentumSkip int `yaml:"momentumSkip"`
+	VolatilitySelection float64 `yaml:"volatilitySelection"`
+	InvertVolatilityOrder bool `yaml:"invertVolatilityOrder"`
 	LongPositions int `yaml:"longPositions"`
 	ShortPositions int `yaml:"shortPositions"`
 }
@@ -60,19 +64,14 @@ type componentMap map[time.Time][]string
 
 type assetData struct {
 	symbol string
-	records []dateRecord
-	recordMap map[time.Time]indexRecord
+	closes []float64
+	records map[time.Time]indexRecord
 	currentClose float64
-	sharpeRatio float64
-}
-
-type dateRecord struct {
-	date time.Time
-	close float64
+	volatility float64
+	momentum float64
 }
 
 type indexRecord struct {
-	date time.Time
 	index int
 	close float64
 }
@@ -277,8 +276,9 @@ func performBacktest() {
 			if !exists {
 				continue
 			}
-			asset.sharpeRatio = math.NaN()
-			record, exists := asset.recordMap[date]
+			asset.volatility = math.NaN()
+			asset.momentum = math.NaN()
+			record, exists := asset.records[date]
 			if !exists {
 				continue
 			}
@@ -286,33 +286,33 @@ func performBacktest() {
 			if math.IsNaN(asset.currentClose) {
 				commons.Fatalf("NaN close in %s at %s", symbol, commons.GetDateString(date))
 			}
-			records := []dateRecord{}
-			lookbackIndex := max(record.index - configuration.LookbackPeriod, 0)
-			for i := lookbackIndex; i <= record.index; i++ {
-				record := asset.records[i]
-				if len(records) > 0 {
-					lastRecord := records[len(records) - 1]
-					if record.date.Month() != lastRecord.date.Month() {
-						records = append(records, record)
-					}
-				} else {
-					records = append(records, record)
-				}
-			}
 			returns := []float64{}
-			for i := 1; i < len(records); i++ {
-				record := records[i]
-				previousRecord := records[i - 1]
-				r := getRateOfChange(record.close, previousRecord.close)
+			volatilityIndex := max(record.index - configuration.VolatilityDays, 0)
+			for i := volatilityIndex; i < record.index; i++ {
+				close := asset.closes[i + 1]
+				previousClose := asset.closes[i]
+				r := getRateOfChange(close, previousClose)
 				returns = append(returns, r)
 			}
-			meanReturn := commons.Mean(returns)
-			volatility := commons.StdDev(returns)
-			asset.sharpeRatio = meanReturn / volatility
+			asset.volatility = commons.StdDev(returns)
+			momentumIndex1 := max(record.index - configuration.MomentumSkip, 0)
+			momentumClose1 := asset.closes[momentumIndex1]
+			momentumIndex2 := max(record.index - configuration.MomentumDays, 0)
+			momentumClose2 := asset.closes[momentumIndex2]
+			asset.momentum = getRateOfChange(momentumClose1, momentumClose2)
 			enabledAssets = append(enabledAssets, asset)
 		}
 		slices.SortFunc(enabledAssets, func (a, b *assetData) int {
-			return cmp.Compare(b.sharpeRatio, a.sharpeRatio)
+			if configuration.InvertVolatilityOrder {
+				return cmp.Compare(b.volatility, a.volatility)
+			} else {
+				return cmp.Compare(a.volatility, b.volatility)
+			}
+		})
+		selectionIndex := int(configuration.VolatilitySelection * float64(len(enabledAssets)))
+		enabledAssets = enabledAssets[:selectionIndex]
+		slices.SortFunc(enabledAssets, func (a, b *assetData) int {
+			return cmp.Compare(b.momentum, a.momentum)
 		})
 		totalPositions := configuration.LongPositions + configuration.ShortPositions
 		if len(enabledAssets) < totalPositions {
@@ -331,7 +331,7 @@ func performBacktest() {
 				short: false,
 				asset: asset,
 			}
-			fmt.Printf("%s symbol = %s, short = false, size = %.2f, currentClose = %.2f, sharpeRatio = %.3f\n", commons.GetDateString(date), asset.symbol, size, asset.currentClose, asset.sharpeRatio)
+			fmt.Printf("%s symbol = %s, short = false, size = %.2f, currentClose = %.2f, volatility = %.4f, momentum = %.3f\n", commons.GetDateString(date), asset.symbol, size, asset.currentClose, asset.volatility, asset.momentum)
 			positions = append(positions, position)
 		}
 		for i := range configuration.ShortPositions {
@@ -344,7 +344,7 @@ func performBacktest() {
 				short: true,
 				asset: asset,
 			}
-			fmt.Printf("%s symbol = %s, short = true, size = %.2f, currentClose = %.2f, sharpeRatio = %.3f\n", commons.GetDateString(date), asset.symbol, size, asset.currentClose, asset.sharpeRatio)
+			fmt.Printf("%s symbol = %s, short = true, size = %.2f, currentClose = %.2f, volatility = %.4f, momentum = %.3f\n", commons.GetDateString(date), asset.symbol, size, asset.currentClose, asset.volatility, asset.momentum)
 			positions = append(positions, position)
 		}
 		previousRebalance = true
@@ -404,8 +404,8 @@ func loadAssets() []assetData {
 			commons.Fatalf("Unable to parse file name: %s", base)
 		}
 		symbol := match[0]
-		records := []dateRecord{}
-		recordMap := map[time.Time]indexRecord{}
+		closes := []float64{}
+		records := map[time.Time]indexRecord{}
 		index := 0
 		previousClose := math.NaN()
 		commons.ReadCSVColumns(file, columns, func (values []string) {
@@ -414,25 +414,22 @@ func loadAssets() []assetData {
 			if close <= 0.0 {
 				close = previousClose
 			}
-			record1 := dateRecord{
-				date: date,
-				close: close,
-			}
-			records = append(records, record1)
-			record2 := indexRecord{
+			record := indexRecord{
 				close: close,
 				index: index,
 			}
-			recordMap[date] = record2
+			closes = append(closes, close)
+			records[date] = record
 			index++
 			previousClose = close
 		})
 		asset := assetData{
 			symbol: symbol,
+			closes: closes,
 			records: records,
-			recordMap: recordMap,
 			currentClose: math.NaN(),
-			sharpeRatio: math.NaN(),
+			volatility: math.NaN(),
+			momentum: math.NaN(),
 		}
 		assets = append(assets, asset)
 	}
@@ -459,7 +456,7 @@ func getRebalanceMode(modeString string) rebalanceMode {
 func (a *assetData) getClose(date time.Time) float64 {
 	d := date
 	for range scanLimit {
-		record, exists := a.recordMap[d]
+		record, exists := a.records[d]
 		if exists {
 			return record.close
 		}
