@@ -53,6 +53,7 @@ type Configuration struct {
 	InvertVolatilityOrder bool `yaml:"invertVolatilityOrder"`
 	LongPositions int `yaml:"longPositions"`
 	ShortPositions int `yaml:"shortPositions"`
+	BannedSymbols []string `yaml:"bannedSymbols"`
 }
 
 type PlotData struct {
@@ -223,6 +224,12 @@ func performBacktest() {
 			cash += pnl
 			capitalGains += pnl
 		}
+		if date.Month() == time.January {
+			if capitalGains > 0 {
+				cash -= configuration.Tax * capitalGains
+				capitalGains = 0.0
+			}
+		}
 		r := getRateOfChange(cash, previousCash)
 		dateString := commons.GetDateString(date)
 		totalReturn := getRateOfChange(cash, configuration.InitialCash)
@@ -230,12 +237,6 @@ func performBacktest() {
 		plotData.Returns = append(plotData.Returns, totalReturn)
 		returns = append(returns, r)
 		positions = []stockPosition{}
-		if date.Month() == time.January {
-			if capitalGains > 0 {
-				cash -= configuration.Tax * capitalGains
-				capitalGains = 0.0
-			}
-		}
 	}
 	rebalanceMode := getRebalanceMode(configuration.RebalanceMode)
 	previousRebalance := false
@@ -377,9 +378,6 @@ func loadComponents() componentMap {
 	components := componentMap{}
 	commons.ReadCSVColumns(configuration.ComponentsPath, columns, func (records []string) {
 		date := commons.MustParseTime(records[0])
-		if date.Before(configuration.HistoryStartDate.Time) {
-			return
-		}
 		symbols := strings.Split(records[1], ",")
 		components[date] = symbols
 	})
@@ -404,6 +402,9 @@ func loadAssets() []assetData {
 			commons.Fatalf("Unable to parse file name: %s", base)
 		}
 		symbol := match[0]
+		if slices.Contains(configuration.BannedSymbols, symbol) {
+			continue
+		}
 		closes := []float64{}
 		records := map[time.Time]indexRecord{}
 		index := 0
